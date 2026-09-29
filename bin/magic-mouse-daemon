@@ -89,6 +89,12 @@ PAD_GAP_MM = 6.0  # each virtual finger sits this far from the centre line
 # libinput discards touchpad motion that looks like a jump, judged per 12 ms. Mouse reports
 # arrive in Bluetooth bursts, so pad frames are paced instead of written per report.
 PAD_FRAME_S = 0.008
+# libinput's rule: a step (normalized to 12 ms) over 20 mm, or 7 mm longer than the
+# previous one, is a jump; the previous step is forgotten after a 25 ms gap. A fast
+# flick's ramp exceeds that, so the fingers' steps are capped (with margin) and the
+# rest carries over to the next frame.
+PAD_STEP_MAX_MM = 18.0
+PAD_STEP_GROWTH_MM = 6.0
 # The daemon has already decided this is a scroll when the fingers land; this much extra
 # travel on the first move lets libinput decide too, instead of waiting out a hold gesture.
 PAD_PREROLL_MM = 2.0
@@ -323,7 +329,8 @@ def make_uinput() -> UInput:
 def make_touchpad() -> UInput:
     axis = AbsInfo(0, 0, int(PAD_SIZE_MM * PAD_RES), 0, 0, PAD_RES)
     cap = {
-        e.EV_KEY: [e.BTN_LEFT, e.BTN_TOUCH, e.BTN_TOOL_FINGER, e.BTN_TOOL_DOUBLETAP],
+        # BTN_RIGHT: without it libinput assumes a clickpad (soft buttons, thumb areas)
+        e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_TOUCH, e.BTN_TOOL_FINGER, e.BTN_TOOL_DOUBLETAP],
         e.EV_ABS: [
             (e.ABS_X, axis), (e.ABS_Y, axis),
             (e.ABS_MT_SLOT, AbsInfo(0, 0, 1, 0, 0, 0)),
@@ -624,9 +631,12 @@ class Engine:
         # scroll.output = "touchpad": the virtual touchpad and its two fingers
         self.pad: UInput | None = None
         self.pad_down = False
-        self.pad_xy = [0.0, 0.0]  # centre of the two virtual fingers, in mm
+        self.pad_xy = [0.0, 0.0]  # where the two virtual fingers are headed (their centre), in mm
+        self.pad_out = [0.0, 0.0]  # where they were last written
+        self.pad_step = 0.0  # last written step, mm per 12 ms (see PAD_STEP_GROWTH_MM)
         self.pad_tid = 0
-        self.pad_dirty = False  # the fingers moved since the last pad frame
+        self.pad_dirty = False  # the fingers are behind pad_xy
+        self.pad_lifting = False  # scroll ended: lift once the fingers caught up
         self.pad_rolled = False  # PAD_PREROLL_MM applied for this scroll
         self.pad_last_t = 0.0  # time.monotonic() of the last pad frame
         self.update_config(cfg)
@@ -715,7 +725,7 @@ class Engine:
         self.two_key = None
         self.two_ref = None
         self.stop_coast("reset")
-        self.pad_lift()
+        self.pad_lift(force=True)
 
     def sync_mt(self) -> None:
         """Load the kernel's current multitouch state. Events only carry changes, so
@@ -953,7 +963,10 @@ class Engine:
     # ---- touchpad scroll output
     def pad_touch(self) -> None:
         """Put two fingers down in the middle of the virtual touchpad."""
+        self.pad_lift(force=True)  # a previous scroll may still be catching up
         self.pad_xy = [PAD_SIZE_MM / 2, PAD_SIZE_MM / 2]
+        self.pad_out = list(self.pad_xy)
+        self.pad_step = 0.0
         self.pad_tid = (self.pad_tid + 2) % 65534
         self.pad_down = True
         self.pad_rolled = False
@@ -962,7 +975,7 @@ class Engine:
         self.pad_dirty = False
 
     def pad_frame(self, landing: bool = False) -> None:
-        x, y = self.pad_xy
+        x, y = self.pad_out
         for slot, off in ((0, -PAD_GAP_MM), (1, PAD_GAP_MM)):
             self.pad.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
             if landing:
@@ -989,17 +1002,40 @@ class Engine:
         self.pad_dirty = True
 
     def pad_flush(self, now: float) -> None:
-        """Write the fingers' position if they moved and PAD_FRAME_S passed since the last frame."""
-        if self.pad_dirty and self.pad_down and now - self.pad_last_t >= PAD_FRAME_S:
-            self.pad_frame()
-            self.pad_last_t = now
-            self.pad_dirty = False
+        """Move the fingers toward pad_xy if PAD_FRAME_S passed since the last frame,
+        by no more than libinput accepts as one step."""
+        dt = now - self.pad_last_t
+        if not (self.pad_dirty and self.pad_down) or dt < PAD_FRAME_S:
+            return
+        dx, dy = self.pad_xy[0] - self.pad_out[0], self.pad_xy[1] - self.pad_out[1]
+        step = math.hypot(dx, dy) * 0.012 / dt
+        if dt > 0.025:
+            self.pad_step = 0.0  # libinput does not check across the gap, and forgets
+            k = 1.0
+        else:
+            limit = min(PAD_STEP_MAX_MM, self.pad_step + PAD_STEP_GROWTH_MM)
+            k = 1.0 if step <= limit else limit / step
+        self.pad_out = [self.pad_out[0] + dx * k, self.pad_out[1] + dy * k]
+        self.pad_step = step * k if dt <= 0.025 else 0.0
+        self.pad_dirty = k < 1.0
+        self.pad_frame()
+        self.pad_last_t = now
+        if self.pad_lifting and not self.pad_dirty:
+            self.pad_lift()
 
-    def pad_lift(self) -> None:
+    def pad_lift(self, force: bool = False) -> None:
+        """Lift the fingers once they caught up with pad_xy, so a fast flick keeps its
+        distance and its speed at release (the app's fling starts from that); `force` lifts now."""
         if not self.pad_down:
             return
         self.pad_flush(time.monotonic())
+        if not self.pad_down:
+            return  # that flush was the last step and already lifted
+        if self.pad_dirty and not force:
+            self.pad_lifting = True  # pad_flush lifts after the last step
+            return
         self.pad_dirty = False
+        self.pad_lifting = False
         for slot in (0, 1):
             self.pad.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
             self.pad.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
