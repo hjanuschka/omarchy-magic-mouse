@@ -98,6 +98,10 @@ PAD_STEP_GROWTH_MM = 6.0
 # The daemon has already decided this is a scroll when the fingers land; this much extra
 # travel on the first move lets libinput decide too, instead of waiting out a hold gesture.
 PAD_PREROLL_MM = 2.0
+# Sideways scrolls travel this much farther on the pad. Page swipes complete at a share of
+# the display width (Chrome: 30%), which the mouse's narrow surface cannot reach at the
+# vertical scroll speed.
+PAD_SIDEWAYS_GAIN = 3.5
 
 
 def EVIOCGMTSLOTS(length: int) -> int:
@@ -992,7 +996,7 @@ class Engine:
     def pad_scroll(self, amount: float, axis: str) -> None:
         """Slide the fingers. `amount` has the wheel output's sign: positive = scroll up / right.
         libinput (natural scrolling off for the pad) scrolls down when the fingers move down."""
-        mm = amount
+        mm = amount * (PAD_SIDEWAYS_GAIN if axis == "x" else 1.0)
         if mm and not self.pad_rolled:
             mm += math.copysign(PAD_PREROLL_MM, mm)
             self.pad_rolled = True
