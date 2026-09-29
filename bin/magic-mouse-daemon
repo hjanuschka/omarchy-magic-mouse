@@ -1288,6 +1288,7 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="log scroll starts and momentum")
     ap.add_argument("--list", action="store_true", help="show detected Magic Mouse and exit")
     ap.add_argument("--record", metavar="PATH", help="append the mouse's raw input events to PATH (for debugging)")
+    ap.add_argument("--device", metavar="PATH", help="use this evdev node instead of the first Magic Mouse found")
     args = ap.parse_args()
 
     if args.list:
@@ -1312,7 +1313,9 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         while True:
-            dev = find_mouse()
+            dev = InputDevice(args.device) if args.device and os.path.exists(args.device) else None
+            if not args.device:
+                dev = find_mouse()
             if dev is None:
                 time.sleep(RESCAN_SEC)
                 continue
