@@ -680,7 +680,6 @@ class Engine:
         self.axis = "y"
         self.s_rem = 0.0
         self.s_notch = 0
-        self.s_budget = 0.0
         self.s_vel = 0.0
         self.s_speed = 0.0  # smoothed finger speed, mm/s
         self.s_last_t = -1.0
@@ -1226,7 +1225,6 @@ class Engine:
             self.s_speed = 0.0
             self.s_rem = 0.0
             self.s_notch = 0
-            self.s_budget = float(s["max_speed"]) * NOMINAL_DT
             self.s_last_t = ts
             if self.cfg["scroll"]["output"] == "touchpad":
                 self.pad_touch()
@@ -1248,13 +1246,10 @@ class Engine:
         d_mm = dy_mm if self.axis == "y" else dx_mm
         dt = max(ts - self.s_last_t, 0.0)
         # The sensor sometimes teleports a touch (same tracking id, a many-unit jump in
-        # one report) or re-registers a finger whose motion then counts twice, and a
-        # Bluetooth stall flushes many queued reports in one burst; unclamped, either
-        # reaches the compositor as a very fast flick. The cap is wall-clock true: a
-        # burst shares the elapsed time's budget instead of each report bringing its own.
-        self.s_budget = min(self.s_budget + float(s["max_speed"]) * dt, float(s["max_speed"]) * NOMINAL_DT * 3)
-        d_mm = max(-self.s_budget, min(self.s_budget, d_mm))
-        self.s_budget -= abs(d_mm)
+        # one report) or re-registers a finger whose motion then counts twice; unclamped,
+        # one such burst reaches the compositor as a very fast flick.
+        cap = float(s["max_speed"]) * max(dt, NOMINAL_DT)
+        d_mm = max(-cap, min(cap, d_mm))
         self.s_travel += d_mm
         self.s_last_t = ts
         # Both estimates are smoothed with each report weighted by its dt, like the
