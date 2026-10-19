@@ -146,6 +146,7 @@ DEFAULTS = {
         "settle_ms": 150.0,  # the mouse counts as moving if it moved within this long...
         "settle_counts": 4.0,  # ...by more than this many raw counts (then a scroll needs POINTER_RATIO more slide)
         "accel": 0.6,  # 0 = linear, 1 = strong ramp with finger speed
+        "max_speed": 300.0,  # mm/s; a report may not scroll faster than this (firmware position spikes clip here)
         "horizontal": True,
         "output": "wheel",  # "touchpad": apps get touchpad scrolling and do momentum and page swipes themselves
     },
@@ -1243,8 +1244,13 @@ class Engine:
                 log("scroll stop (pointer moving)")
             return
         d_mm = dy_mm if self.axis == "y" else dx_mm
-        self.s_travel += d_mm
         dt = max(ts - self.s_last_t, 0.0)
+        # The sensor sometimes teleports a touch (same tracking id, a many-unit jump in
+        # one report) or re-registers a finger whose motion then counts twice; unclamped,
+        # one such burst reaches the compositor as a very fast flick.
+        cap = float(s["max_speed"]) * max(dt, NOMINAL_DT)
+        d_mm = max(-cap, min(cap, d_mm))
+        self.s_travel += d_mm
         self.s_last_t = ts
         # Both estimates are smoothed with each report weighted by its dt, like the
         # pointer's velocity: Bluetooth delivers reports in bursts, and a burst
