@@ -120,6 +120,7 @@ DEFAULTS = {
         "settle_ms": 150.0,  # the mouse counts as moving if it moved within this long...
         "settle_counts": 4.0,  # ...by more than this many raw counts (then a scroll needs POINTER_RATIO more slide)
         "accel": 0.6,  # 0 = linear, 1 = strong ramp with finger speed
+        "max_scroll_speed": 400.0,  # mm/s ceiling on emitted scroll; clips rocket flings, leaves normal scroll alone
         "horizontal": True,
     },
     "buttons": {
@@ -1143,7 +1144,14 @@ class Engine:
         self.s_speed += k_speed * ((abs(d_mm) / dt if dt > 0 else 0.0) - self.s_speed)
         ramp = 1.0 + float(s["accel"]) * min(max((self.s_speed - 75.0) / 370.0, 0.0), 2.0)
         sign = self.scroll_sign(self.axis)
-        hires = sign * d_mm * HIRES_PER_MM * float(s["speed"]) * ramp
+        amount = sign * d_mm * float(s["speed"]) * ramp
+        # A real finger tops out around max_scroll_speed mm/s; the ramp, a firmware
+        # position spike or a resting-finger wiggle after a Bluetooth stall can push the
+        # output past that. Clip the emitted distance (not the raw finger motion, so
+        # normal scrolling is untouched) so the momentum it seeds can never rocket.
+        cap = float(s["max_scroll_speed"]) * max(dt, NOMINAL_DT)
+        amount = max(-cap, min(cap, amount))
+        hires = amount * HIRES_PER_MM
         self.emit_scroll(hires, self.axis)
         self.s_vel += k_vel * ((hires / dt if dt > 0 else 0.0) - self.s_vel)
 
